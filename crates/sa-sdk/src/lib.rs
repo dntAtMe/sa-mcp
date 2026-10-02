@@ -2,6 +2,7 @@
 //!
 //! - [`addr`]: addresses and struct offsets, each marked with how it was verified
 //! - [`mem`]: fault-tolerant reads/writes (ReadProcessMemory on our own process)
+//! - [`d3d`]: the game's D3D9 device and vtable-slot hooks (Present, EndScene, ...)
 //! - [`hook`]: call-site hooks that chain to the previous target (composes with other plugins)
 //! - [`script`]: execute SCM opcodes through a private CRunningScript
 //! - [`world`]: player/entity/pool helpers built on the above
@@ -9,6 +10,7 @@
 //! Game-state functions must be called on the game thread.
 
 pub mod addr;
+pub mod d3d;
 pub mod hook;
 pub mod mem;
 pub mod script;

@@ -206,6 +206,46 @@ fn r2(v: f64) -> f64 {
     (v * 100.0).round() / 100.0
 }
 
+/// Value at a dotted path ("battle.round", "remotes.0.hp") inside a JSON value.
+pub fn json_path<'a>(v: &'a Value, path: &str) -> &'a Value {
+    path.split('.').filter(|p| !p.is_empty()).fold(v, |cur, key| match key.parse::<usize>() {
+        Ok(i) if cur.is_array() => &cur[i],
+        _ => &cur[key],
+    })
+}
+
+/// Reads `fields` from every instance's plugin debug JSON and reports whether they agree.
+pub fn plugin_compare(args: &Value) -> Result<Value, String> {
+    let module = args.get("module").and_then(Value::as_str).unwrap_or("minisamp.asi");
+    let fields: Vec<String> = args
+        .get("fields")
+        .and_then(Value::as_array)
+        .ok_or("fields (array of dotted paths) is required")?
+        .iter()
+        .filter_map(|f| f.as_str().map(str::to_string))
+        .collect();
+    let list = targets(crate::tools::instances_arg(args));
+    let mut per_instance = Map::new();
+    let mut docs = Vec::new();
+    for n in &list {
+        let doc = bridge::query(Some(*n), &Request::PluginQuery { module: module.into(), export: "sa_debug_json".into() })
+            .map_err(|e| format!("instance {n}: {e}"))?;
+        docs.push((*n, doc));
+    }
+    let mut mismatches = Vec::new();
+    for f in &fields {
+        let values: Vec<&Value> = docs.iter().map(|(_, d)| json_path(d, f)).collect();
+        if values.windows(2).any(|w| w[0] != w[1]) {
+            mismatches.push(f.clone());
+        }
+    }
+    for (n, doc) in &docs {
+        let m: Map<String, Value> = fields.iter().map(|f| (f.clone(), json_path(doc, f).clone())).collect();
+        per_instance.insert(n.to_string(), Value::Object(m));
+    }
+    Ok(json!({ "consistent": mismatches.is_empty(), "mismatched_fields": mismatches, "values": per_instance }))
+}
+
 /// Exact matching through a plugin's debug export (`net_id` + `remotes[].net_id/position`),
 /// see `plugin_query`. Returns None when not every instance exposes it.
 fn compare_by_net_id(list: &[u8], plugin: &str) -> Option<Value> {

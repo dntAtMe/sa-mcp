@@ -91,6 +91,17 @@ pub fn definitions() -> Vec<Value> {
             &[],
         ),
         tool(
+            "plugin_compare",
+            "Consistency check across clients: read dotted-path fields (e.g. \"battle.round\", \"battle.hp\") from every instance's \
+             plugin debug JSON (sa_debug_json) and report whether all instances agree, with the values per instance.",
+            json!({
+                "fields": { "type": "array", "items": { "type": "string" } },
+                "module": { "type": "string", "description": "default minisamp.asi" },
+                "instances": instances.clone(),
+            }),
+            &["fields"],
+        ),
+        tool(
             "sync_trace",
             "Sample compare_instances (net-id matching) over time and return, per instance pair, mean/p95/max of total, network-lag and              render error plus snap count and a series. Use while driving a client with `input` (wait=false) and/or with server_netsim to tune sync.",
             json!({
@@ -133,6 +144,13 @@ pub fn definitions() -> Vec<Value> {
             &[],
         ),
         tool("server_kick", "Kick a player by id.", json!({ "id": { "type": "integer" } }), &["id"]),
+        tool(
+            "server_admin",
+            "Send any command to the server's admin port and return its data, e.g. {\"cmd\":\"battles\"} or \
+             {\"cmd\":\"battle_start\",\"leader\":1,\"enemies\":2}. Use for server-specific commands without a dedicated tool.",
+            json!({ "request": { "type": "object", "description": "JSON object with at least `cmd`" } }),
+            &["request"],
+        ),
         tool("server_logs", "Tail of the server's stdout/stderr.", json!({ "lines": { "type": "integer", "description": "default 50" } }), &[]),
         // --- per-instance state ---
         itool("game_status", "Bridge connectivity, game version, whether the game loop is running, player presence.", json!({}), &[]),
@@ -391,6 +409,13 @@ pub fn call(name: &str, args: &Value) -> Option<Value> {
         }
         "server_kick" => return Some(json_result(mpserver::admin(json!({ "cmd": "kick", "id": args.get("id").cloned().unwrap_or(Value::Null) })))),
         "server_logs" => return Some(json_result(mpserver::logs(args))),
+        "server_admin" => {
+            return Some(match args.get("request") {
+                Some(r) if r.get("cmd").is_some() => json_result(mpserver::admin(r.clone())),
+                _ => text_result("request must be an object with `cmd`".into(), true),
+            })
+        }
+        "plugin_compare" => return Some(json_result(multi::plugin_compare(args))),
         "game_status" => return Some(game_status(instance)),
         "screenshot" => return Some(take_screenshot(instance, args)),
         "input" => return Some(run_input(instance, args)),
