@@ -14,7 +14,10 @@ if (Get-Process gta_sa -ErrorAction SilentlyContinue) { throw 'gta_sa.exe is run
 $profileName = if ($Debug) { 'debug' } else { 'release' }
 Push-Location $root
 try {
+    # cargo reports progress on stderr; Windows PowerShell would turn that into a terminating error.
+    $ErrorActionPreference = 'Continue'
     if ($Debug) { cargo build } else { cargo build --release }
+    $ErrorActionPreference = 'Stop'
     if ($LASTEXITCODE -ne 0) { throw 'cargo build failed' }
 } finally { Pop-Location }
 

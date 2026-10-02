@@ -1,5 +1,7 @@
 //! MCP tool definitions and dispatch.
 
+use std::process::Stdio;
+
 use base64::Engine;
 use proto::{Request, Response};
 use serde_json::{json, Value};
@@ -182,7 +184,14 @@ fn launch_game() -> Value {
         return text_result("GTA_SA_DIR env var is not set (configure it in .mcp.json)".into(), true);
     };
     let exe = std::path::Path::new(&dir).join("gta_sa.exe");
-    match std::process::Command::new(&exe).current_dir(&dir).spawn() {
+    // Detach stdio: the game must not inherit our stdout, which is the MCP channel.
+    let spawned = std::process::Command::new(&exe)
+        .current_dir(&dir)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn();
+    match spawned {
         Ok(child) => text_result(
             format!("started {} (pid {}). The bridge comes up a few seconds after launch; poll game_status.", exe.display(), child.id()),
             false,
