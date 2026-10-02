@@ -1,55 +1,14 @@
 //! Captures the game window's client area via PrintWindow(PW_RENDERFULLCONTENT), which
 //! works for D3D9 windows even when partially covered. Returns PNG bytes.
 
-use windows::core::PWSTR;
-use windows::Win32::Foundation::{CloseHandle, BOOL, HWND, LPARAM, RECT};
+use windows::Win32::Foundation::RECT;
 use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::Storage::Xps::{PrintWindow, PRINT_WINDOW_FLAGS};
-use windows::Win32::System::Threading::{
-    OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
-};
-use windows::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, GetClientRect, GetWindowThreadProcessId, IsIconic, IsWindowVisible,
-};
+use windows::Win32::UI::WindowsAndMessaging::{GetClientRect, IsIconic};
+
+use crate::window;
 
 const PW_CLIENTONLY_RENDERFULLCONTENT: u32 = 0x1 | 0x2;
-
-unsafe fn process_exe_name(hwnd: HWND) -> Option<String> {
-    let mut pid = 0u32;
-    GetWindowThreadProcessId(hwnd, Some(&mut pid));
-    let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
-    let mut buf = [0u16; 520];
-    let mut len = buf.len() as u32;
-    let res = QueryFullProcessImageNameW(handle, PROCESS_NAME_WIN32, PWSTR(buf.as_mut_ptr()), &mut len);
-    let _ = CloseHandle(handle);
-    res.ok()?;
-    let path = String::from_utf16_lossy(&buf[..len as usize]);
-    path.rsplit('\\').next().map(str::to_ascii_lowercase)
-}
-
-/// Picks the visible top-level window owned by gta_sa.exe that has a non-empty client area.
-unsafe extern "system" fn enum_cb(hwnd: HWND, lparam: LPARAM) -> BOOL {
-    let found = &mut *(lparam.0 as *mut Option<HWND>);
-    if !IsWindowVisible(hwnd).as_bool() {
-        return BOOL(1);
-    }
-    if process_exe_name(hwnd).as_deref() == Some("gta_sa.exe") {
-        let mut rc = RECT::default();
-        if GetClientRect(hwnd, &mut rc).is_ok() && rc.right > 0 && rc.bottom > 0 {
-            *found = Some(hwnd);
-            return BOOL(0);
-        }
-    }
-    BOOL(1)
-}
-
-pub fn find_game_window() -> Option<HWND> {
-    let mut found: Option<HWND> = None;
-    unsafe {
-        let _ = EnumWindows(Some(enum_cb), LPARAM(&mut found as *mut _ as isize));
-    }
-    found
-}
 
 pub struct Shot {
     pub png: Vec<u8>,
@@ -57,8 +16,9 @@ pub struct Shot {
     pub height: u32,
 }
 
-pub fn capture(max_width: u32) -> Result<Shot, String> {
-    let hwnd = find_game_window().ok_or("game window not found")?;
+/// Captures the window of game process `pid` (or any gta_sa.exe window when None).
+pub fn capture(pid: Option<u32>, max_width: u32) -> Result<Shot, String> {
+    let hwnd = window::find(pid).ok_or("game window not found")?;
     unsafe {
         if IsIconic(hwnd).as_bool() {
             return Err("game window is minimized".into());

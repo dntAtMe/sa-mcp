@@ -14,6 +14,48 @@ pub const VERSION_CHECK_US10: u32 = 0x94BF;
 pub const CALL_IDLE: u32 = 0x53ECBD;
 /// [static] `call FrontendIdle` (0x53E770) in RsEventHandler: menu frames.
 pub const CALL_FRONTEND_IDLE: u32 = 0x53ECCB;
+/// [static] `call CPad::UpdatePads` (0x541DD0), first thing in CGame::Process (0x53BEE0).
+/// Pad overrides are applied right after it.
+pub const CALL_UPDATE_PADS: u32 = 0x53BEE6;
+/// [static] `bool IsAlreadyRunning()` — CreateEventA + ERROR_ALREADY_EXISTS. Called from WinMain 0x74872D.
+pub const IS_ALREADY_RUNNING: u32 = 0x7468E0;
+/// [static] WinMain state LOGO: `mov [gGameState], 2` at 0x748B08; imm32 at +6. Writing 5 skips
+/// the logo/title/intro movies straight to FRONTEND_LOADING.
+pub const LOGO_NEXT_STATE_IMM: u32 = 0x748B0E;
+/// [static] WinMain main loop: `cmp [ForegroundApp 0x8D621C], 0; je +0x320` (6 bytes at
+/// 0x748A8D) skips the frame and Sleep(100)s while the window is in the background.
+pub const MAINLOOP_BACKGROUND_JE: u32 = 0x748A8D;
+/// [static] Opens the pause menu on focus loss (`if (!0xBA6831 && !menuActive)
+/// activateMenuNextFrame = 1`). Only caller: WndProc deactivate path at 0x748063.
+pub const PAUSE_ON_FOCUS_LOSS: u32 = 0x53BC60;
+/// [static] `void CTheScripts::Process()` (cdecl). Patched to `ret` in mp mode.
+pub const THE_SCRIPTS_PROCESS: u32 = 0x46A000;
+/// [static] `void CRunningScript::Init()` (thiscall; Hoodlum thunk -> 0x15626B0).
+pub const RUNNING_SCRIPT_INIT: u32 = 0x4648E0;
+/// [static] `bool CRunningScript::ProcessOneCommand()` (thiscall).
+pub const RUNNING_SCRIPT_PROCESS_ONE: u32 = 0x469EB0;
+/// [static] `CPad* CPad::GetPad(int)` = 0xB73458 + n * 0x134. NewState (CControllerState) at +0.
+pub const PADS: u32 = 0xB73458;
+
+/// [static] CMenuManager (0xBA6748) fields used by WinMain state FRONTEND_IDLE (0x748CA4):
+/// menu leaves -> state 8 (start game) when m_bMenuActive == 0.
+pub const MENU_ACTIVATE_NEXT_FRAME: u32 = 0xBA677B;
+pub const MENU_ACTIVE: u32 = 0xBA67A4;
+/// [live] CTimer::m_UserPause (u8). The frontend sets it while the menu is open and clears it
+/// when New Game is chosen through the menu; leaving the menu by flag writes must clear it too.
+pub const TIMER_USER_PAUSE: u32 = 0xB7CB49;
+
+/// [static] CRunningScript layout (from Init and CollectParameters).
+pub const SCRIPT_SIZE: usize = 0xE0;
+pub const SCRIPT_BASE_IP: usize = 0x10;
+pub const SCRIPT_IP: usize = 0x14;
+pub const SCRIPT_SP: usize = 0x38;
+pub const SCRIPT_LOCALS: usize = 0x3C;
+pub const SCRIPT_COND_RESULT: usize = 0xC5;
+pub const SCRIPT_NOT_FLAG: usize = 0xD2;
+pub const SCRIPT_IS_MISSION: usize = 0xDC;
+pub const SCRIPT_LOCAL_COUNT: usize = 32;
+
 /// [static] `void CWorld::Remove(CEntity*)` (cdecl)
 pub const CWORLD_REMOVE: u32 = 0x563280;
 /// [static] `void CWorld::Add(CEntity*)` (cdecl)
@@ -40,8 +82,9 @@ pub const WEATHER_NEW: u32 = 0xC8131C;
 pub const TIMER_MS: u32 = 0xB7CB84;
 /// CTimer::m_FrameCounter
 pub const FRAME_COUNTER: u32 = 0xB7CB4C;
-/// gGameState (9 = playing)
+/// gGameState: 5 frontend loading, 6 loaded, 7 menu, 8 loading game, 9 playing
 pub const GAME_STATE: u32 = 0xC8D4C0;
+pub const GS_FRONTEND_IDLE: i32 = 7;
 /// CGame::currArea (interior id)
 pub const CURR_AREA: u32 = 0xB72914;
 

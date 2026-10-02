@@ -1,4 +1,4 @@
-//! Line-delimited JSON server on 127.0.0.1:BRIDGE_PORT. One thread per connection.
+//! Line-delimited JSON server on 127.0.0.1:BASE_PORT+instance. One thread per connection.
 
 use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
@@ -6,22 +6,22 @@ use std::sync::atomic::Ordering;
 use std::sync::mpsc;
 use std::time::Duration;
 
-use proto::{Request, Response, BRIDGE_PORT};
+use proto::{Request, Response};
 use serde_json::json;
 
-use crate::{addr, game, log, mem, Job, FRAMES_PUMPED, HOOKED, JOBS, SUPPORTED};
+use crate::{addr, game, instance, log, mem, pad, record, Job, FRAMES_PUMPED, HOOKED, JOBS, SUPPORTED};
 
 const GAME_THREAD_TIMEOUT: Duration = Duration::from_secs(3);
 
-pub fn run() {
-    let listener = match TcpListener::bind(("127.0.0.1", BRIDGE_PORT)) {
+pub fn run(port: u16) {
+    let listener = match TcpListener::bind(("127.0.0.1", port)) {
         Ok(l) => l,
         Err(e) => {
-            log::write(&format!("bind 127.0.0.1:{BRIDGE_PORT} failed: {e}"));
+            log::write(&format!("bind 127.0.0.1:{port} failed: {e}"));
             return;
         }
     };
-    log::write(&format!("listening on 127.0.0.1:{BRIDGE_PORT}"));
+    log::write(&format!("listening on 127.0.0.1:{port}"));
     for stream in listener.incoming().flatten() {
         std::thread::spawn(move || {
             if let Err(e) = serve(stream) {
@@ -56,10 +56,18 @@ fn execute(req: Request) -> Response {
         Request::Logs => Response::ok(json!({ "lines": log::snapshot() })),
         // Fault-safe (ReadProcessMemory), so serve it even while the game thread is busy or hung.
         req @ Request::ReadMemory { .. } => unsafe { game::handle(&req) },
-        req => {
-            if !HOOKED.load(Ordering::SeqCst) {
-                return Response::err("game hooks not installed (unsupported exe?); see status/logs");
+        _ if !HOOKED.load(Ordering::SeqCst) => {
+            Response::err("game hooks not installed (unsupported exe?); see status/logs")
+        }
+        Request::Record { seconds, hz } => {
+            let (tx, rx) = mpsc::channel();
+            if let Err(e) = record::start(seconds, hz, tx) {
+                return Response::err(e);
             }
+            rx.recv_timeout(Duration::from_secs_f32(seconds) + GAME_THREAD_TIMEOUT)
+                .unwrap_or_else(|_| Response::err("recording did not finish (game not in gameplay frames?)"))
+        }
+        req => {
             let (tx, rx) = mpsc::channel();
             JOBS.lock().unwrap().push_back(Job { req, reply: tx });
             rx.recv_timeout(GAME_THREAD_TIMEOUT).unwrap_or_else(|_| {
@@ -73,6 +81,9 @@ fn status() -> Response {
     // Plain reads of ints from another thread; good enough for a status snapshot.
     Response::ok(json!({
         "bridge_version": env!("CARGO_PKG_VERSION"),
+        "instance": instance::id(),
+        "pid": std::process::id(),
+        "input_pending_ms": pad::pending_ms(),
         "game_version": if SUPPORTED.load(Ordering::SeqCst) { "1.0 US" } else { "unsupported" },
         "hooks_installed": HOOKED.load(Ordering::SeqCst),
         "frames_pumped": FRAMES_PUMPED.load(Ordering::Relaxed),

@@ -1,12 +1,12 @@
 //! MCP tool definitions and dispatch.
 
-use std::process::Stdio;
+use std::time::Duration;
 
 use base64::Engine;
-use proto::{Request, Response};
+use proto::{InputStep, Request, Response, ScriptArg, ScriptCommand};
 use serde_json::{json, Value};
 
-use crate::{bridge, screenshot};
+use crate::{bridge, multi, screenshot};
 
 fn tool(name: &str, description: &str, properties: Value, required: &[&str]) -> Value {
     json!({
@@ -16,71 +16,204 @@ fn tool(name: &str, description: &str, properties: Value, required: &[&str]) -> 
     })
 }
 
+/// A tool that targets one game instance: adds the optional `instance` property.
+fn itool(name: &str, description: &str, mut properties: Value, required: &[&str]) -> Value {
+    properties.as_object_mut().unwrap().insert(
+        "instance".into(),
+        json!({ "type": "integer", "minimum": 0, "maximum": 7, "description": "Game instance (see list_instances). Default: lowest running." }),
+    );
+    tool(name, description, properties, required)
+}
+
+/// CControllerState field names in memory order (index = field id on the wire).
+pub const PAD_FIELD_NAMES: [&str; proto::PAD_FIELDS] = [
+    "LeftStickX", "LeftStickY", "RightStickX", "RightStickY",
+    "LeftShoulder1", "LeftShoulder2", "RightShoulder1", "RightShoulder2",
+    "DPadUp", "DPadDown", "DPadLeft", "DPadRight",
+    "Start", "Select", "ButtonSquare", "ButtonTriangle", "ButtonCross", "ButtonCircle",
+    "ShockButtonL", "ShockButtonR", "ChatIndicated", "PedWalk", "VehicleMouseLook", "RadioTrackSkip",
+];
+
+/// High-level action -> (field, value). On foot and in vehicles the same buttons mean
+/// different things, hence the aliases.
+const ACTIONS: &[(&str, &str, i16)] = &[
+    ("forward", "LeftStickY", -128),
+    ("back", "LeftStickY", 128),
+    ("left", "LeftStickX", -128),
+    ("right", "LeftStickX", 128),
+    ("steer_left", "LeftStickX", -128),
+    ("steer_right", "LeftStickX", 128),
+    ("sprint", "ButtonCross", 255),
+    ("accelerate", "ButtonCross", 255),
+    ("jump", "ButtonSquare", 255),
+    ("brake", "ButtonSquare", 255),
+    ("enter_exit", "ButtonTriangle", 255),
+    ("fire", "ButtonCircle", 255),
+    ("aim", "RightShoulder1", 255),
+    ("handbrake", "RightShoulder1", 255),
+    ("crouch", "ShockButtonL", 255),
+    ("horn", "ShockButtonL", 255),
+    ("walk", "PedWalk", 255),
+    ("look_left", "RightStickX", -128),
+    ("look_right", "RightStickX", 128),
+];
+
 pub fn definitions() -> Vec<Value> {
     let radius = json!({ "radius": { "type": "number", "description": "Only include entities within this distance of the player" } });
     let address = json!({ "type": ["string", "integer"], "description": "Address as hex string (\"0xB7CD98\") or integer" });
+    let instances = json!({ "type": "array", "items": { "type": "integer" }, "description": "Instances to include. Default: all running." });
+    let action_names: Vec<&str> = ACTIONS.iter().map(|a| a.0).collect();
     vec![
-        tool("game_status", "Bridge connectivity, game version, whether the game loop is running, player presence. Call first.", json!({}), &[]),
-        tool("get_player_state", "Player position, heading, health, armor, money, wanted level, interior and current vehicle.", json!({}), &[]),
-        tool("get_world_state", "Game clock, weather, current interior area, game timer and game state.", json!({}), &[]),
-        tool("list_vehicles", "Vehicles in the vehicle pool with model id, position, health and distance to the player.", radius.clone(), &[]),
-        tool("list_peds", "Peds in the ped pool with model id, position, health and distance to the player.", radius, &[]),
+        // --- instances ---
+        tool("list_instances", "Running game instances (slot, pid, port, game state, player position). Call first.", json!({}), &[]),
         tool(
+            "launch_instances",
+            "Start N game clients from GTA_SA_DIR. By default they boot straight into an empty multiplayer-style world \
+             (movies skipped, menu skipped, main.scm off, player spawned at Grove Street offset by 2m per instance, no traffic/peds/wanted). \
+             Waits until each bridge is up and tiles the windows.",
+            json!({
+                "count": { "type": "integer", "minimum": 1, "maximum": 8 },
+                "boot": {
+                    "type": "object",
+                    "description": "Overrides for the boot config: skip_intro, auto_start, mp_mode (bools), spawn {x,y,z,heading}, time [h,m], weather id. Set mp_mode=false for the normal story game.",
+                },
+                "tile": { "type": "boolean", "description": "Tile windows on screen (default true)" },
+            }),
+            &["count"],
+        ),
+        tool("stop_instances", "Terminate game instances.", json!({ "instances": instances.clone() }), &[]),
+        tool(
+            "compare_instances",
+            "Desync check: for each pair of instances, find where instance A's local player appears in instance B (nearest non-local ped, and nearest vehicle of the same model if A is driving) and report position/heading/health differences.",
+            json!({ "instances": instances.clone() }),
+            &[],
+        ),
+        tool(
+            "record",
+            "Sample player state (t_ms, x, y, z, heading, speed m/s, health, in_vehicle, frame) on the game thread at `hz` for `seconds`, on several instances at once. Combine with `input` to measure movement and sync.",
+            json!({
+                "instances": instances,
+                "seconds": { "type": "number", "minimum": 0, "maximum": 60 },
+                "hz": { "type": "number", "minimum": 0.5, "maximum": 60, "description": "default 10" },
+            }),
+            &["seconds"],
+        ),
+        // --- per-instance state ---
+        itool("game_status", "Bridge connectivity, game version, whether the game loop is running, player presence.", json!({}), &[]),
+        itool("get_player_state", "Player position, heading, health, armor, money, wanted level, interior and current vehicle.", json!({}), &[]),
+        itool("get_world_state", "Game clock, weather, current interior area, game timer and game state.", json!({}), &[]),
+        itool("list_vehicles", "Vehicles in the vehicle pool with model id, position, health and distance to the player.", radius.clone(), &[]),
+        itool("list_peds", "Peds in the ped pool with model id, position, health and distance to the player.", radius, &[]),
+        itool(
             "teleport",
             "Move the player (or the player's vehicle) to world coordinates. Pick z slightly above ground; distant areas may need a moment to stream collision.",
             json!({ "x": { "type": "number" }, "y": { "type": "number" }, "z": { "type": "number" } }),
             &["x", "y", "z"],
         ),
-        tool(
+        itool(
             "set_player",
             "Set any of player health (0-100 normally), armor (0-100) and money.",
             json!({ "health": { "type": "number" }, "armor": { "type": "number" }, "money": { "type": "integer" } }),
             &[],
         ),
-        tool(
+        itool(
             "set_time",
             "Set the in-game clock.",
             json!({ "hour": { "type": "integer", "minimum": 0, "maximum": 23 }, "minute": { "type": "integer", "minimum": 0, "maximum": 59 } }),
             &["hour", "minute"],
         ),
-        tool(
+        itool(
             "set_weather",
             "Force weather id (0-45, e.g. 0 sunny LS, 8 rainy, 9 foggy, 19 sandstorm).",
             json!({ "id": { "type": "integer", "minimum": 0, "maximum": 45 } }),
             &["id"],
         ),
-        tool(
+        // --- control ---
+        itool(
+            "run_script",
+            "Execute GTA SA SCM opcodes (Sanny Builder opcode numbers) in a persistent script context with 32 local variables that survive between calls. \
+             Args: JSON integer -> int, number with a decimal point -> float (write 2495.0, not 2495, for coordinates), string -> text, \
+             {\"var\": n} -> local var n (for outputs such as created handles, and to pass them back in), {\"float\": x} / {\"int\": n} to force a type. \
+             Example: request + load + create car: [{op:\"0247\",args:[411]},{op:\"038B\"},{op:\"00A5\",args:[411,2500.0,-1670.0,13.5,{\"var\":2}]}]. \
+             Returns each command's condition result and the values of all vars referenced. Wrong argument counts are detected and stop execution, \
+             but bad arguments can still crash the game.",
+            json!({
+                "commands": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "op": { "type": ["string", "integer"], "description": "Opcode as hex string (\"00A5\"); add 0x8000 for NOT" },
+                            "args": { "type": "array" },
+                        },
+                        "required": ["op"],
+                    },
+                },
+            }),
+            &["commands"],
+        ),
+        itool(
+            "input",
+            "Inject controller input into the game (no window focus needed; overrides real input for the listed fields). \
+             Steps run back to back; each holds its actions for `ms`. Actions: forward, back, left, right, sprint, jump, enter_exit, fire, aim, crouch, walk, look_left, look_right; \
+             in vehicles: accelerate, brake, steer_left, steer_right, handbrake, horn. `raw` sets CControllerState fields directly (sticks -128..128, buttons 0/255). \
+             A step with no actions is a pause. Movement is relative to the camera.",
+            json!({
+                "steps": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "ms": { "type": "integer" },
+                            "actions": { "type": "array", "items": { "type": "string", "enum": action_names } },
+                            "raw": { "type": "object", "description": format!("Field name -> value. Fields: {}", PAD_FIELD_NAMES.join(", ")) },
+                        },
+                        "required": ["ms"],
+                    },
+                },
+                "append": { "type": "boolean", "description": "Append to the running queue instead of replacing it" },
+                "wait": { "type": "boolean", "description": "Return after the sequence finishes (default true, max 30 s)" },
+            }),
+            &["steps"],
+        ),
+        itool("input_clear", "Stop injected input immediately.", json!({}), &[]),
+        // --- debugging ---
+        itool(
             "read_memory",
-            "Read raw bytes from game memory (fault-safe). Max 4096 bytes.",
+            "Read raw bytes from game memory (fault-safe, works during loads). Max 4096 bytes.",
             json!({ "address": address, "length": { "type": "integer", "minimum": 1, "maximum": 4096 } }),
             &["address", "length"],
         ),
-        tool(
+        itool(
             "write_memory",
             "Write raw bytes into game memory. Dangerous: wrong writes crash the game.",
             json!({ "address": address, "bytes_hex": { "type": "string", "description": "e.g. \"90 90 90\"" } }),
             &["address", "bytes_hex"],
         ),
-        tool("bridge_logs", "Recent log lines from the in-game bridge plugin.", json!({}), &[]),
-        tool(
+        itool("bridge_logs", "Recent log lines from the in-game bridge plugin.", json!({}), &[]),
+        itool(
             "screenshot",
             "Capture the game window as a PNG image.",
             json!({ "max_width": { "type": "integer", "description": "Downscale to this width (default 960, 0 = full size)" } }),
             &[],
         ),
-        tool("launch_game", "Start gta_sa.exe from GTA_SA_DIR if it is not already running.", json!({}), &[]),
     ]
 }
 
-fn text_result(text: String, is_error: bool) -> Value {
+pub fn text_result(text: String, is_error: bool) -> Value {
     json!({ "content": [{ "type": "text", "text": text }], "isError": is_error })
 }
 
-fn bridge_result(req: Request) -> Value {
-    match bridge::send(&req) {
-        Ok(Response { ok: true, data, .. }) => {
-            text_result(serde_json::to_string_pretty(&data.unwrap_or(Value::Null)).unwrap(), false)
-        }
+pub fn json_result(v: Result<Value, String>) -> Value {
+    match v {
+        Ok(v) => text_result(serde_json::to_string_pretty(&v).unwrap(), false),
+        Err(e) => text_result(e, true),
+    }
+}
+
+fn bridge_result(instance: Option<u8>, req: Request) -> Value {
+    match bridge::send(instance, &req) {
+        Ok(Response { ok: true, data, .. }) => json_result(Ok(data.unwrap_or(Value::Null))),
         Ok(Response { error, .. }) => text_result(error.unwrap_or_else(|| "unknown bridge error".into()), true),
         Err(e) => text_result(e, true),
     }
@@ -88,6 +221,10 @@ fn bridge_result(req: Request) -> Value {
 
 fn f32_arg(args: &Value, k: &str) -> Option<f32> {
     args.get(k).and_then(Value::as_f64).map(|v| v as f32)
+}
+
+pub fn instances_arg(args: &Value) -> Option<Vec<u8>> {
+    args.get("instances").and_then(Value::as_array).map(|a| a.iter().filter_map(|v| v.as_u64()).map(|v| v as u8).collect())
 }
 
 fn parse_address(v: Option<&Value>) -> Result<u32, String> {
@@ -105,17 +242,104 @@ fn parse_address(v: Option<&Value>) -> Result<u32, String> {
     }
 }
 
+fn parse_script(args: &Value) -> Result<Vec<ScriptCommand>, String> {
+    let cmds = args.get("commands").and_then(Value::as_array).ok_or("commands must be an array")?;
+    cmds.iter()
+        .enumerate()
+        .map(|(i, c)| {
+            let op = match c.get("op") {
+                Some(Value::String(s)) => {
+                    let s = s.trim().trim_start_matches("0x").trim_start_matches("0X");
+                    u16::from_str_radix(s, 16).map_err(|e| format!("command {i}: bad op {s:?}: {e}"))?
+                }
+                Some(Value::Number(n)) => n.as_u64().and_then(|n| u16::try_from(n).ok()).ok_or(format!("command {i}: bad op"))?,
+                _ => return Err(format!("command {i}: op is required")),
+            };
+            let args = match c.get("args") {
+                None | Some(Value::Null) => Vec::new(),
+                Some(Value::Array(a)) => a.iter().map(|v| parse_script_arg(v).map_err(|e| format!("command {i}: {e}"))).collect::<Result<_, _>>()?,
+                Some(_) => return Err(format!("command {i}: args must be an array")),
+            };
+            Ok(ScriptCommand { op, args })
+        })
+        .collect()
+}
+
+fn parse_script_arg(v: &Value) -> Result<ScriptArg, String> {
+    match v {
+        Value::Number(n) if n.is_i64() || n.is_u64() => {
+            n.as_i64().and_then(|n| i32::try_from(n).ok()).map(ScriptArg::Int).ok_or(format!("int out of range: {n}"))
+        }
+        Value::Number(n) => Ok(ScriptArg::Float(n.as_f64().unwrap() as f32)),
+        Value::String(s) => Ok(ScriptArg::Str(s.clone())),
+        Value::Object(o) => {
+            if let Some(i) = o.get("var").and_then(Value::as_u64) {
+                Ok(ScriptArg::Var(i as u16))
+            } else if let Some(f) = o.get("float").and_then(Value::as_f64) {
+                Ok(ScriptArg::Float(f as f32))
+            } else if let Some(i) = o.get("int").and_then(Value::as_i64) {
+                Ok(ScriptArg::Int(i as i32))
+            } else {
+                Err(format!("unknown arg object {v}"))
+            }
+        }
+        _ => Err(format!("unsupported arg {v}")),
+    }
+}
+
+fn field_index(name: &str) -> Option<u8> {
+    PAD_FIELD_NAMES.iter().position(|f| f.eq_ignore_ascii_case(name)).map(|i| i as u8)
+}
+
+fn parse_input(args: &Value) -> Result<Vec<InputStep>, String> {
+    let steps = args.get("steps").and_then(Value::as_array).ok_or("steps must be an array")?;
+    steps
+        .iter()
+        .enumerate()
+        .map(|(i, s)| {
+            let ms = s.get("ms").and_then(Value::as_u64).ok_or(format!("step {i}: ms is required"))? as u32;
+            let mut fields: Vec<(u8, i16)> = Vec::new();
+            let mut set = |idx: u8, val: i16| {
+                fields.retain(|f| f.0 != idx);
+                fields.push((idx, val));
+            };
+            for a in s.get("actions").and_then(Value::as_array).into_iter().flatten() {
+                let name = a.as_str().unwrap_or("");
+                let (_, field, val) = ACTIONS.iter().find(|x| x.0 == name).ok_or(format!("step {i}: unknown action {name:?}"))?;
+                set(field_index(field).unwrap(), *val);
+            }
+            for (k, v) in s.get("raw").and_then(Value::as_object).into_iter().flatten() {
+                let idx = field_index(k).or_else(|| k.parse().ok()).ok_or(format!("step {i}: unknown field {k:?}"))?;
+                let val = v.as_i64().ok_or(format!("step {i}: {k} must be an integer"))?;
+                set(idx, val.clamp(i16::MIN as i64, i16::MAX as i64) as i16);
+            }
+            Ok(InputStep { ms, fields })
+        })
+        .collect()
+}
+
 /// Returns None for unknown tool names.
 pub fn call(name: &str, args: &Value) -> Option<Value> {
+    let instance = args.get("instance").and_then(Value::as_u64).map(|v| v as u8);
     let req = match name {
-        "game_status" => return Some(game_status()),
-        "screenshot" => return Some(take_screenshot(args)),
-        "launch_game" => return Some(launch_game()),
+        "list_instances" => return Some(json_result(Ok(multi::list()))),
+        "launch_instances" => return Some(json_result(multi::launch(args))),
+        "stop_instances" => return Some(json_result(multi::stop(instances_arg(args)))),
+        "compare_instances" => return Some(json_result(multi::compare(instances_arg(args)))),
+        "record" => return Some(json_result(multi::record(args))),
+        "game_status" => return Some(game_status(instance)),
+        "screenshot" => return Some(take_screenshot(instance, args)),
+        "input" => return Some(run_input(instance, args)),
         "bridge_logs" => Request::Logs,
         "get_player_state" => Request::PlayerState,
         "get_world_state" => Request::WorldState,
         "list_vehicles" => Request::ListVehicles { radius: f32_arg(args, "radius") },
         "list_peds" => Request::ListPeds { radius: f32_arg(args, "radius") },
+        "input_clear" => Request::InputClear,
+        "run_script" => match parse_script(args) {
+            Ok(commands) => Request::RunScript { commands },
+            Err(e) => return Some(text_result(e, true)),
+        },
         "teleport" => match (f32_arg(args, "x"), f32_arg(args, "y"), f32_arg(args, "z")) {
             (Some(x), Some(y), Some(z)) => Request::Teleport { x, y, z },
             _ => return Some(text_result("x, y and z are required numbers".into(), true)),
@@ -147,24 +371,44 @@ pub fn call(name: &str, args: &Value) -> Option<Value> {
         },
         _ => return None,
     };
-    Some(bridge_result(req))
+    Some(bridge_result(instance, req))
 }
 
-fn game_status() -> Value {
-    let window = screenshot::find_game_window().is_some();
-    match bridge::send(&Request::Status) {
-        Ok(Response { data: Some(mut d), .. }) => {
-            d["game_window_found"] = json!(window);
-            text_result(serde_json::to_string_pretty(&d).unwrap(), false)
-        }
-        Ok(r) => text_result(format!("bridge error: {:?}", r.error), true),
-        Err(e) => text_result(format!("{e}\ngame_window_found: {window}"), true),
+fn game_status(instance: Option<u8>) -> Value {
+    json_result(bridge::query(instance, &Request::Status).map(|mut d| {
+        let pid = d.get("pid").and_then(Value::as_u64).map(|p| p as u32);
+        d["game_window_found"] = json!(crate::window::find(pid).is_some());
+        d
+    }))
+}
+
+fn run_input(instance: Option<u8>, args: &Value) -> Value {
+    let steps = match parse_input(args) {
+        Ok(s) => s,
+        Err(e) => return text_result(e, true),
+    };
+    let total: u32 = steps.iter().map(|s| s.ms).sum();
+    let append = args.get("append").and_then(Value::as_bool).unwrap_or(false);
+    if let Err(e) = bridge::query(instance, &Request::Input { steps, append }) {
+        return text_result(e, true);
     }
+    if args.get("wait").and_then(Value::as_bool).unwrap_or(true) {
+        std::thread::sleep(Duration::from_millis(total.min(30_000) as u64 + 50));
+    }
+    json_result(bridge::query(instance, &Request::Status).map(|s| {
+        json!({ "queued_ms": total, "pending_ms": s.get("input_pending_ms").cloned().unwrap_or(Value::Null) })
+    }))
 }
 
-fn take_screenshot(args: &Value) -> Value {
+fn take_screenshot(instance: Option<u8>, args: &Value) -> Value {
     let max_width = args.get("max_width").and_then(Value::as_u64).unwrap_or(960) as u32;
-    match screenshot::capture(max_width) {
+    // Prefer the window of the requested instance; fall back to any game window when no bridge runs.
+    let pid = match bridge::query(instance, &Request::Status) {
+        Ok(s) => s.get("pid").and_then(Value::as_u64).map(|p| p as u32),
+        Err(e) if instance.is_some() => return text_result(e, true),
+        Err(_) => None,
+    };
+    match screenshot::capture(pid, max_width) {
         Ok(shot) => json!({
             "content": [
                 { "type": "image", "mimeType": "image/png", "data": base64::engine::general_purpose::STANDARD.encode(&shot.png) },
@@ -173,29 +417,5 @@ fn take_screenshot(args: &Value) -> Value {
             "isError": false,
         }),
         Err(e) => text_result(e, true),
-    }
-}
-
-fn launch_game() -> Value {
-    if screenshot::find_game_window().is_some() {
-        return text_result("game window already open".into(), false);
-    }
-    let Ok(dir) = std::env::var("GTA_SA_DIR") else {
-        return text_result("GTA_SA_DIR env var is not set (configure it in .mcp.json)".into(), true);
-    };
-    let exe = std::path::Path::new(&dir).join("gta_sa.exe");
-    // Detach stdio: the game must not inherit our stdout, which is the MCP channel.
-    let spawned = std::process::Command::new(&exe)
-        .current_dir(&dir)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn();
-    match spawned {
-        Ok(child) => text_result(
-            format!("started {} (pid {}). The bridge comes up a few seconds after launch; poll game_status.", exe.display(), child.id()),
-            false,
-        ),
-        Err(e) => text_result(format!("failed to start {}: {e}", exe.display()), true),
     }
 }

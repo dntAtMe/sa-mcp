@@ -2,8 +2,10 @@
 //! Implements: initialize, ping, tools/list, tools/call. Logs go to stderr.
 
 mod bridge;
+mod multi;
 mod screenshot;
 mod tools;
+mod window;
 
 use std::io::{self, BufRead, Write};
 
@@ -11,7 +13,23 @@ use serde_json::{json, Value};
 
 const SUPPORTED_PROTOCOLS: &[&str] = &["2025-06-18", "2025-03-26", "2024-11-05"];
 
+/// Child processes (game clients) must not inherit our stdio pipes: CreateProcess with
+/// handle inheritance passes every inheritable handle, not just the child's own stdio, and a
+/// game holding the MCP pipe keeps it open after we exit.
+fn make_stdio_non_inheritable() {
+    use windows::Win32::Foundation::{SetHandleInformation, HANDLE_FLAGS, HANDLE_FLAG_INHERIT};
+    use windows::Win32::System::Console::{GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE};
+    for id in [STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE] {
+        unsafe {
+            if let Ok(h) = GetStdHandle(id) {
+                let _ = SetHandleInformation(h, HANDLE_FLAG_INHERIT.0, HANDLE_FLAGS(0));
+            }
+        }
+    }
+}
+
 fn main() {
+    make_stdio_non_inheritable();
     let stdin = io::stdin();
     let mut stdout = io::stdout().lock();
     eprintln!("sa-mcp {} ready", env!("CARGO_PKG_VERSION"));
@@ -57,9 +75,10 @@ fn handle(msg: &Value) -> Option<Value> {
                 "protocolVersion": version,
                 "capabilities": { "tools": {} },
                 "serverInfo": { "name": "sa-mcp", "version": env!("CARGO_PKG_VERSION") },
-                "instructions": "Tools for a running GTA San Andreas 1.0 US instance with the sa_bridge.asi plugin. \
-                    Call game_status first. Coordinates are world units (metres); heading is degrees, 0 = north. \
-                    Game-state tools only work while the game window is running (not minimized).",
+                "instructions": "Tools for GTA San Andreas 1.0 US clients running the sa_bridge.asi plugin. \
+                    Call list_instances first; launch_instances starts clients that boot straight into an empty world. \
+                    Per-instance tools take an optional `instance` (default: lowest running). \
+                    Coordinates are world units (metres); heading is degrees, 0 = north.",
             })
         }
         "ping" => json!({}),

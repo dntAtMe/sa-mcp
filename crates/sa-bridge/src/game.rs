@@ -91,7 +91,7 @@ pub unsafe fn handle(req: &Request) -> Response {
 
 fn dispatch(req: &Request) -> Result<Value, String> {
     match req {
-        Request::Status | Request::Logs => Err("handled on network thread".into()),
+        Request::Status | Request::Logs | Request::Record { .. } => Err("handled on network thread".into()),
 
         Request::PlayerState => {
             let ped = require_player()?;
@@ -245,7 +245,43 @@ fn dispatch(req: &Request) -> Result<Value, String> {
             mem::write_bytes(*address, &bytes)?;
             Ok(json!({ "address": format!("{address:#x}"), "written": bytes.len() }))
         }
+
+        Request::RunScript { commands } => unsafe { crate::script::run(commands) },
+
+        Request::Input { steps, append } => {
+            let total = crate::pad::set(steps.clone(), *append);
+            Ok(json!({ "queued_ms": total, "pending_ms": crate::pad::pending_ms() }))
+        }
+
+        Request::InputClear => {
+            crate::pad::clear();
+            Ok(json!({ "cleared": true }))
+        }
     }
+}
+
+/// [x, y, z, heading, speed m/s, health, in_vehicle, frame] for the recorder.
+pub fn sample_player() -> Option<[f64; 8]> {
+    let ped = player_ped();
+    if ped == 0 {
+        return None;
+    }
+    let in_vehicle = ped_in_vehicle(ped);
+    let body = if in_vehicle { rd::<u32>(ped + PED_VEHICLE) } else { ped };
+    let p = entity_pos(body);
+    let v: [f32; 3] = [rd(body + PHYS_MOVE_SPEED), rd(body + PHYS_MOVE_SPEED + 4), rd(body + PHYS_MOVE_SPEED + 8)];
+    // Move speed is in units per 1/50 s.
+    let speed = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt() * 50.0;
+    Some([
+        p[0] as f64,
+        p[1] as f64,
+        p[2] as f64,
+        entity_heading(body) as f64,
+        speed as f64,
+        rd::<f32>(ped + PED_HEALTH) as f64,
+        in_vehicle as u8 as f64,
+        rd::<u32>(FRAME_COUNTER) as f64,
+    ])
 }
 
 unsafe fn teleport_entity(e: u32, pos: [f32; 3]) -> Result<(), String> {
