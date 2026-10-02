@@ -3,10 +3,17 @@
 //! Threading model:
 //! - A network thread accepts connections on 127.0.0.1 and parses requests.
 //! - Requests that touch game state are queued and executed on the game thread
-//!   from hooks on `Idle` (in-game frames) and `FrontendIdle` (menu frames).
+//!   from hooks on the `call Idle` (in-game frames) and `call FrontendIdle` (menu frames)
+//!   sites in RsEventHandler.
+//!
+//! Why call-site hooks instead of detouring the function prologue: other plugins
+//! (SilentPatch, modloader) patch instructions inside Idle's first bytes and hook the same
+//! call sites. Rewriting a call's rel32 and chaining to whatever it pointed at before is the
+//! GTA modding convention and composes with them in any load order.
 //! - The network thread waits for the result and writes it back.
 
 mod addr;
+mod crash;
 mod game;
 mod log;
 mod mem;
@@ -18,7 +25,6 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Mutex, OnceLock};
 
-use minhook::MinHook;
 use proto::{Request, Response};
 use windows::Win32::Foundation::{BOOL, HMODULE, TRUE};
 use windows::Win32::System::SystemServices::DLL_PROCESS_ATTACH;
@@ -39,7 +45,9 @@ static ORIG_IDLE: OnceLock<IdleFn> = OnceLock::new();
 static ORIG_FRONTEND_IDLE: OnceLock<IdleFn> = OnceLock::new();
 
 fn pump_jobs() {
-    FRAMES_PUMPED.fetch_add(1, Ordering::Relaxed);
+    if FRAMES_PUMPED.fetch_add(1, Ordering::Relaxed) == 0 {
+        log::write(&format!("game thread id {}", unsafe { windows::Win32::System::Threading::GetCurrentThreadId() }));
+    }
     let jobs: Vec<Job> = match JOBS.lock() {
         Ok(mut q) if !q.is_empty() => q.drain(..).collect(),
         _ => return,
@@ -60,23 +68,33 @@ unsafe extern "C" fn hk_frontend_idle(arg: *mut c_void) {
     (ORIG_FRONTEND_IDLE.get().unwrap())(arg)
 }
 
+/// Redirects the `call rel32` at `site` to `detour`, storing the previous target in `slot`.
+unsafe fn hook_call_site(site: u32, detour: IdleFn, slot: &OnceLock<IdleFn>) -> Result<(), String> {
+    let opcode = mem::read::<u8>(site).ok_or_else(|| format!("cannot read {site:#x}"))?;
+    if opcode != 0xE8 {
+        return Err(format!("expected call (E8) at {site:#x}, found {opcode:#04x}"));
+    }
+    let rel = mem::read::<i32>(site + 1).ok_or_else(|| format!("cannot read {:#x}", site + 1))?;
+    let previous = (site + 5).wrapping_add(rel as u32);
+    let _ = slot.set(std::mem::transmute::<usize, IdleFn>(previous as usize));
+    let new_rel = (detour as usize as u32).wrapping_sub(site + 5);
+    mem::write_bytes(site + 1, &new_rel.to_le_bytes())?;
+    log::write(&format!("hooked call at {site:#x} (previous target {previous:#x})"));
+    Ok(())
+}
+
 unsafe fn install_hooks() -> Result<(), String> {
-    let hook = |target: u32, detour: IdleFn, slot: &OnceLock<IdleFn>| -> Result<(), String> {
-        let tramp = MinHook::create_hook(target as *mut c_void, detour as *mut c_void)
-            .map_err(|e| format!("create_hook {target:#x}: {e:?}"))?;
-        let _ = slot.set(std::mem::transmute::<*mut c_void, IdleFn>(tramp));
-        Ok(())
-    };
-    hook(addr::IDLE, hk_idle, &ORIG_IDLE)?;
-    hook(addr::FRONTEND_IDLE, hk_frontend_idle, &ORIG_FRONTEND_IDLE)?;
-    MinHook::enable_all_hooks().map_err(|e| format!("enable_all_hooks: {e:?}"))?;
+    hook_call_site(addr::CALL_IDLE, hk_idle, &ORIG_IDLE)?;
+    hook_call_site(addr::CALL_FRONTEND_IDLE, hk_frontend_idle, &ORIG_FRONTEND_IDLE)?;
     Ok(())
 }
 
 #[no_mangle]
-unsafe extern "system" fn DllMain(_module: HMODULE, reason: u32, _reserved: *mut c_void) -> BOOL {
+unsafe extern "system" fn DllMain(module: HMODULE, reason: u32, _reserved: *mut c_void) -> BOOL {
     if reason == DLL_PROCESS_ATTACH {
         log::init();
+        log::write(&format!("module base {:#x}", module.0 as usize));
+        crash::install();
         let supported = mem::read::<u32>(addr::VERSION_CHECK) == Some(addr::VERSION_CHECK_US10);
         SUPPORTED.store(supported, Ordering::SeqCst);
         if supported {

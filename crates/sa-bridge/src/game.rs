@@ -1,4 +1,5 @@
-//! Request handlers. Everything here runs on the game thread (see `pump_jobs`).
+//! Request handlers. Everything here runs on the game thread (see `pump_jobs`),
+//! except `ReadMemory`, which the network thread serves directly.
 
 use proto::{Request, Response};
 use serde_json::{json, Value};

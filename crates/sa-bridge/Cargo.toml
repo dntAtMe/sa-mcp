@@ -11,7 +11,6 @@ crate-type = ["cdylib"]
 [dependencies]
 proto = { path = "../proto" }
 serde_json.workspace = true
-minhook = "0.9"
 
 [dependencies.windows]
 version = "0.58"
@@ -20,4 +19,6 @@ features = [
     "Win32_System_SystemServices",
     "Win32_System_Threading",
     "Win32_System_Diagnostics_Debug",
+    "Win32_System_Kernel",
+    "Win32_System_Memory",
 ]

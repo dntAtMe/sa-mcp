@@ -9,7 +9,7 @@ use std::time::Duration;
 use proto::{Request, Response, BRIDGE_PORT};
 use serde_json::json;
 
-use crate::{addr, log, mem, Job, FRAMES_PUMPED, HOOKED, JOBS, SUPPORTED};
+use crate::{addr, game, log, mem, Job, FRAMES_PUMPED, HOOKED, JOBS, SUPPORTED};
 
 const GAME_THREAD_TIMEOUT: Duration = Duration::from_secs(3);
 
@@ -54,6 +54,8 @@ fn execute(req: Request) -> Response {
     match req {
         Request::Status => status(),
         Request::Logs => Response::ok(json!({ "lines": log::snapshot() })),
+        // Fault-safe (ReadProcessMemory), so serve it even while the game thread is busy or hung.
+        req @ Request::ReadMemory { .. } => unsafe { game::handle(&req) },
         req => {
             if !HOOKED.load(Ordering::SeqCst) {
                 return Response::err("game hooks not installed (unsupported exe?); see status/logs");

@@ -22,6 +22,7 @@ pub enum Request {
     SetPlayer { health: Option<f32>, armor: Option<f32>, money: Option<i32> },
     SetTime { hour: u8, minute: u8 },
     SetWeather { id: i16 },
+    /// Served off the game thread (fault-safe), so it works during loads and hangs.
     ReadMemory { address: u32, length: u32 },
     WriteMemory { address: u32, bytes_hex: String },
 }

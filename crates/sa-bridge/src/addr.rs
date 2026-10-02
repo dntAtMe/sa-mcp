@@ -10,10 +10,10 @@ pub const VERSION_CHECK: u32 = 0x82457C;
 pub const VERSION_CHECK_US10: u32 = 0x94BF;
 
 // --- functions ---
-/// [static] `void Idle(void*)` — per-frame update while in game. Called from RsEventHandler.
-pub const IDLE: u32 = 0x53E920;
-/// [static] `void FrontendIdle(void*)` — per-frame update while in menus.
-pub const FRONTEND_IDLE: u32 = 0x53E770;
+/// [static] `call Idle` (Idle = 0x53E920, `void Idle(void*)`) in RsEventHandler: in-game frames.
+pub const CALL_IDLE: u32 = 0x53ECBD;
+/// [static] `call FrontendIdle` (0x53E770) in RsEventHandler: menu frames.
+pub const CALL_FRONTEND_IDLE: u32 = 0x53ECCB;
 /// [static] `void CWorld::Remove(CEntity*)` (cdecl)
 pub const CWORLD_REMOVE: u32 = 0x563280;
 /// [static] `void CWorld::Add(CEntity*)` (cdecl)
