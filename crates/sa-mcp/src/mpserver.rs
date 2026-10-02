@@ -75,6 +75,10 @@ pub fn start(args: &Value) -> Result<Value, String> {
         .ok_or("no server command: pass `command` or set SA_MCP_SERVER_CMD")?;
     let parts = split_cmd(&cmdline);
     let (prog, rest) = parts.split_first().ok_or("empty server command")?;
+    // Resolve relative to our cwd (the project root) before current_dir changes for the child.
+    let prog = std::path::absolute(prog).map_err(|e| format!("bad server path {prog:?}: {e}"))?;
+    let prog = prog.to_string_lossy().into_owned();
+    let prog = &prog;
     let log = std::fs::File::create(log_path()).map_err(|e| e.to_string())?;
     let log2 = log.try_clone().map_err(|e| e.to_string())?;
     let mut cmd = Command::new(prog);
