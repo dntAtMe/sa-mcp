@@ -40,6 +40,10 @@ pub enum Request {
     /// Replace (or append to) the queue of controller-state overrides for pad 0.
     Input { steps: Vec<InputStep>, append: bool },
     InputClear,
+    /// Call `export` in loaded module `module` on the game thread and return its JSON.
+    /// Contract: `extern "C" fn(buf: *mut u8, cap: u32) -> u32` writes UTF-8 JSON into `buf`
+    /// (up to `cap` bytes) and returns the full length it needs.
+    PluginQuery { module: String, export: String },
     /// Sample player state on the game thread for `seconds` at `hz`. Reply arrives when done.
     Record { seconds: f32, hz: f32 },
 }

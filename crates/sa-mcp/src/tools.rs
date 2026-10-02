@@ -78,6 +78,8 @@ pub fn definitions() -> Vec<Value> {
                     "description": "Overrides for the boot config: skip_intro, auto_start, mp_mode (bools), spawn {x,y,z,heading}, time [h,m], weather id. Set mp_mode=false for the normal story game.",
                 },
                 "tile": { "type": "boolean", "description": "Tile windows on screen (default true)" },
+                "env": { "type": "object", "description": "Extra environment variables for every client (e.g. a multiplayer server address)" },
+                "env_per_instance": { "type": "array", "items": { "type": "object" }, "description": "Extra env vars per launched client, by launch order (e.g. player names)" },
             }),
             &["count"],
         ),
@@ -189,6 +191,12 @@ pub fn definitions() -> Vec<Value> {
             "Write raw bytes into game memory. Dangerous: wrong writes crash the game.",
             json!({ "address": address, "bytes_hex": { "type": "string", "description": "e.g. \"90 90 90\"" } }),
             &["address", "bytes_hex"],
+        ),
+        itool(
+            "plugin_query",
+            "Ask a plugin loaded in the game for its debug state. The module must export              `extern \"C\" fn sa_debug_json(buf: *mut u8, cap: u32) -> u32` (writes JSON, returns the length it needs);              it is called on the game thread. e.g. module \"minisamp.asi\".",
+            json!({ "module": { "type": "string" }, "export": { "type": "string", "description": "default sa_debug_json" } }),
+            &["module"],
         ),
         itool("bridge_logs", "Recent log lines from the in-game bridge plugin.", json!({}), &[]),
         itool(
@@ -336,6 +344,10 @@ pub fn call(name: &str, args: &Value) -> Option<Value> {
         "list_vehicles" => Request::ListVehicles { radius: f32_arg(args, "radius") },
         "list_peds" => Request::ListPeds { radius: f32_arg(args, "radius") },
         "input_clear" => Request::InputClear,
+        "plugin_query" => Request::PluginQuery {
+            module: args.get("module").and_then(Value::as_str).unwrap_or("").to_string(),
+            export: args.get("export").and_then(Value::as_str).unwrap_or("sa_debug_json").to_string(),
+        },
         "run_script" => match parse_script(args) {
             Ok(commands) => Request::RunScript { commands },
             Err(e) => return Some(text_result(e, true)),

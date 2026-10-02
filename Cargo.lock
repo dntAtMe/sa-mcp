@@ -131,6 +131,7 @@ name = "sa-bridge"
 version = "0.1.0"
 dependencies = [
  "proto",
+ "sa-sdk",
  "serde_json",
  "windows",
 ]
@@ -144,6 +145,13 @@ dependencies = [
  "proto",
  "serde",
  "serde_json",
+ "windows",
+]
+
+[[package]]
+name = "sa-sdk"
+version = "0.1.0"
+dependencies = [
  "windows",
 ]
 

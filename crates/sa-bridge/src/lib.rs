@@ -12,17 +12,17 @@
 //! call sites. Rewriting a call's rel32 and chaining to whatever it pointed at before is the
 //! GTA modding convention and composes with them in any load order.
 
-mod addr;
 mod boot;
 mod crash;
 mod game;
 mod instance;
 mod log;
-mod mem;
 mod pad;
 mod record;
 mod script;
 mod server;
+
+pub(crate) use sa_sdk::{addr, mem};
 
 use std::collections::VecDeque;
 use std::ffi::c_void;
@@ -87,17 +87,9 @@ unsafe extern "C" fn hk_update_pads() {
     pad::apply();
 }
 
-/// Redirects the `call rel32` at `site` to `detour`, storing the previous target in `slot`.
 unsafe fn hook_call_site(site: u32, detour: usize, slot: &OnceLock<usize>) -> Result<(), String> {
-    let opcode = mem::read::<u8>(site).ok_or_else(|| format!("cannot read {site:#x}"))?;
-    if opcode != 0xE8 {
-        return Err(format!("expected call (E8) at {site:#x}, found {opcode:#04x}"));
-    }
-    let rel = mem::read::<i32>(site + 1).ok_or_else(|| format!("cannot read {:#x}", site + 1))?;
-    let previous = (site + 5).wrapping_add(rel as u32);
-    let _ = slot.set(previous as usize);
-    let new_rel = (detour as u32).wrapping_sub(site + 5);
-    mem::write_bytes(site + 1, &new_rel.to_le_bytes())?;
+    let previous = sa_sdk::hook::hook_call(site, detour)?;
+    let _ = slot.set(previous);
     log::write(&format!("hooked call at {site:#x} (previous target {previous:#x})"));
     Ok(())
 }
@@ -116,7 +108,7 @@ unsafe extern "system" fn DllMain(module: HMODULE, reason: u32, _reserved: *mut 
         log::init(slot);
         log::write(&format!("module base {:#x}, instance {slot:?}", module.0 as usize));
         crash::install();
-        let supported = mem::read::<u32>(addr::VERSION_CHECK) == Some(addr::VERSION_CHECK_US10);
+        let supported = sa_sdk::is_supported_game();
         SUPPORTED.store(supported, Ordering::SeqCst);
         if supported {
             boot::apply_patches();

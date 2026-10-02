@@ -64,10 +64,18 @@ pub fn launch(args: &Value) -> Result<Value, String> {
         return Err(format!("only {free} instance slots free"));
     }
 
+    let env_all = args.get("env").and_then(Value::as_object).cloned().unwrap_or_default();
+    let env_each = args.get("env_per_instance").and_then(Value::as_array).cloned().unwrap_or_default();
+    let env_str = |v: &Value| v.as_str().map(str::to_string).unwrap_or_else(|| v.to_string());
+
     let mut pids = Vec::new();
-    for _ in 0..count {
+    for i in 0..count {
+        let mut cmd = Command::new(&exe);
+        for (k, v) in env_all.iter().chain(env_each.get(i).and_then(Value::as_object).into_iter().flatten()) {
+            cmd.env(k, env_str(v));
+        }
         // Detach stdio: the game must not inherit our stdout, which is the MCP channel.
-        let child = Command::new(&exe)
+        let child = cmd
             .current_dir(&dir)
             .env(BOOT_ENV, &boot_json)
             .stdin(Stdio::null())

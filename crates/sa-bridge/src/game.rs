@@ -4,45 +4,12 @@
 use proto::{Request, Response};
 use serde_json::{json, Value};
 
-use crate::addr::*;
-use crate::mem;
-
-fn rd<T: Copy + Default>(address: u32) -> T {
-    mem::read(address).unwrap_or_default()
-}
+use sa_sdk::addr::*;
+use sa_sdk::mem;
+use sa_sdk::world::*;
 
 fn wr<T: Copy>(address: u32, value: T) -> Result<(), String> {
-    let bytes = unsafe {
-        std::slice::from_raw_parts(&value as *const T as *const u8, std::mem::size_of::<T>())
-    };
-    mem::write_bytes(address, bytes)
-}
-
-fn player_ped() -> u32 {
-    rd::<u32>(PLAYERS)
-}
-
-fn entity_pos(e: u32) -> [f32; 3] {
-    let m = rd::<u32>(e + ENT_MATRIX);
-    let base = if m != 0 { m + MAT_POS } else { e + ENT_PLACEMENT };
-    [rd(base), rd(base + 4), rd(base + 8)]
-}
-
-/// Heading in degrees, 0 = north (+Y), counter-clockwise, matching the game's convention.
-fn entity_heading(e: u32) -> f32 {
-    let m = rd::<u32>(e + ENT_MATRIX);
-    let rad = if m != 0 {
-        let fx: f32 = rd(m + MAT_FORWARD);
-        let fy: f32 = rd(m + MAT_FORWARD + 4);
-        (-fx).atan2(fy)
-    } else {
-        rd(e + ENT_PLACEMENT + 0x0C)
-    };
-    rad.to_degrees().rem_euclid(360.0)
-}
-
-fn dist(a: [f32; 3], b: [f32; 3]) -> f32 {
-    ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2)).sqrt()
+    mem::write(address, value)
 }
 
 fn round2(v: f32) -> f64 {
@@ -51,28 +18,6 @@ fn round2(v: f32) -> f64 {
 
 fn pos_json(p: [f32; 3]) -> Value {
     json!({ "x": round2(p[0]), "y": round2(p[1]), "z": round2(p[2]) })
-}
-
-fn ped_in_vehicle(ped: u32) -> bool {
-    rd::<u32>(ped + PED_FLAGS) & (1 << 8) != 0 && rd::<u32>(ped + PED_VEHICLE) != 0
-}
-
-/// Iterate live slots of a CPool, yielding object addresses.
-fn pool_iter(pool_ptr_addr: u32, obj_size: u32) -> Vec<u32> {
-    let pool = rd::<u32>(pool_ptr_addr);
-    if pool == 0 {
-        return Vec::new();
-    }
-    let objects = rd::<u32>(pool);
-    let byte_map = rd::<u32>(pool + 4);
-    let size = rd::<i32>(pool + 8).max(0) as u32;
-    let Some(flags) = mem::read_bytes(byte_map, size as usize) else { return Vec::new() };
-    flags
-        .iter()
-        .enumerate()
-        .filter(|(_, f)| *f & 0x80 == 0)
-        .map(|(i, _)| objects + i as u32 * obj_size)
-        .collect()
 }
 
 fn require_player() -> Result<u32, String> {
@@ -253,6 +198,8 @@ fn dispatch(req: &Request) -> Result<Value, String> {
             Ok(json!({ "queued_ms": total, "pending_ms": crate::pad::pending_ms() }))
         }
 
+        Request::PluginQuery { module, export } => unsafe { plugin_query(module, export) },
+
         Request::InputClear => {
             crate::pad::clear();
             Ok(json!({ "cleared": true }))
@@ -282,6 +229,26 @@ pub fn sample_player() -> Option<[f64; 8]> {
         in_vehicle as u8 as f64,
         rd::<u32>(FRAME_COUNTER) as f64,
     ])
+}
+
+/// See `Request::PluginQuery` for the export contract.
+unsafe fn plugin_query(module: &str, export: &str) -> Result<Value, String> {
+    use windows::core::{HSTRING, PCSTR};
+    use windows::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
+    type DebugFn = unsafe extern "C" fn(*mut u8, u32) -> u32;
+
+    let hmod = GetModuleHandleW(&HSTRING::from(module)).map_err(|_| format!("module {module:?} is not loaded"))?;
+    let name = std::ffi::CString::new(export).map_err(|e| e.to_string())?;
+    let f = GetProcAddress(hmod, PCSTR(name.as_ptr() as *const u8)).ok_or_else(|| format!("{module} has no export {export:?}"))?;
+    let f: DebugFn = std::mem::transmute(f);
+    let mut buf = vec![0u8; 16 * 1024];
+    let mut len = f(buf.as_mut_ptr(), buf.len() as u32) as usize;
+    if len > buf.len() {
+        buf.resize(len, 0);
+        len = f(buf.as_mut_ptr(), buf.len() as u32) as usize;
+    }
+    let text = String::from_utf8_lossy(&buf[..len.min(buf.len())]);
+    Ok(serde_json::from_str(&text).unwrap_or_else(|_| Value::String(text.into_owned())))
 }
 
 unsafe fn teleport_entity(e: u32, pos: [f32; 3]) -> Result<(), String> {

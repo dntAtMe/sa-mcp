@@ -60,3 +60,9 @@ pub fn write_bytes(address: u32, bytes: &[u8]) -> Result<(), String> {
     }
     Ok(())
 }
+
+/// Writes a plain value (fault-tolerant, works on code pages too).
+pub fn write<T: Copy>(address: u32, value: T) -> Result<(), String> {
+    let bytes = unsafe { std::slice::from_raw_parts(&value as *const T as *const u8, size_of::<T>()) };
+    write_bytes(address, bytes)
+}

@@ -8,11 +8,11 @@
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::OnceLock;
 
-use proto::{BootConfig, ScriptArg::*, Spawn, BOOT_ENV};
+use proto::{BootConfig, Spawn, BOOT_ENV};
+use sa_sdk::script::{self, cmd, Arg::*};
 
 use crate::addr::*;
-use crate::script::cmd;
-use crate::{instance, log, mem, script};
+use crate::{instance, log, mem};
 
 static CONFIG: OnceLock<BootConfig> = OnceLock::new();
 static MENU_FRAMES: AtomicU32 = AtomicU32::new(0);
