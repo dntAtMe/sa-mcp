@@ -64,7 +64,7 @@ pub fn capture(pid: Option<u32>, max_width: u32) -> Result<Shot, String> {
 }
 
 /// Nearest-neighbour downscale to `max_width` (keeps token cost of images low), then PNG.
-fn encode(bgra: &[u8], w: u32, h: u32, max_width: u32) -> Result<Shot, String> {
+pub fn encode(bgra: &[u8], w: u32, h: u32, max_width: u32) -> Result<Shot, String> {
     let (ow, oh) = if max_width > 0 && w > max_width {
         (max_width, (h as u64 * max_width as u64 / w as u64).max(1) as u32)
     } else {

@@ -13,6 +13,7 @@
 //! GTA modding convention and composes with them in any load order.
 
 mod boot;
+mod capture;
 mod crash;
 mod game;
 mod instance;
@@ -56,6 +57,7 @@ fn pump_jobs() {
     if FRAMES_PUMPED.fetch_add(1, Ordering::Relaxed) == 0 {
         log::write(&format!("game thread id {}", unsafe { windows::Win32::System::Threading::GetCurrentThreadId() }));
     }
+    capture::ensure_hook();
     let jobs: Vec<Job> = match JOBS.lock() {
         Ok(mut q) if !q.is_empty() => q.drain(..).collect(),
         _ => return,

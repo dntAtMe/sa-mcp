@@ -67,6 +67,14 @@ fn execute(req: Request) -> Response {
             rx.recv_timeout(Duration::from_secs_f32(seconds) + GAME_THREAD_TIMEOUT)
                 .unwrap_or_else(|_| Response::err("recording did not finish (game not in gameplay frames?)"))
         }
+        Request::Screenshot { max_width } => {
+            if !crate::capture::hooked() {
+                return Response::err("Present hook not installed yet (no D3D device / no frames)");
+            }
+            let (tx, rx) = mpsc::channel();
+            crate::capture::request(max_width, tx);
+            rx.recv_timeout(GAME_THREAD_TIMEOUT).unwrap_or_else(|_| Response::err("no frame presented within 3 s"))
+        }
         req => {
             let (tx, rx) = mpsc::channel();
             JOBS.lock().unwrap().push_back(Job { req, reply: tx });

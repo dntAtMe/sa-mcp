@@ -206,9 +206,120 @@ fn r2(v: f64) -> f64 {
     (v * 100.0).round() / 100.0
 }
 
-/// Heuristic matching until the multiplayer layer exposes network ids: a remote player is
-/// the nearest non-local ped, a remote vehicle the nearest one with the same model.
-pub fn compare(instances: Option<Vec<u8>>) -> Result<Value, String> {
+/// Exact matching through a plugin's debug export (`net_id` + `remotes[].net_id/position`),
+/// see `plugin_query`. Returns None when not every instance exposes it.
+fn compare_by_net_id(list: &[u8], plugin: &str) -> Option<Value> {
+    let mut snaps = Vec::new();
+    for &n in list {
+        let player = bridge::query(Some(n), &Request::PlayerState).ok()?;
+        let debug = bridge::query(Some(n), &Request::PluginQuery { module: plugin.into(), export: "sa_debug_json".into() }).ok()?;
+        debug.get("net_id")?.as_u64()?;
+        snaps.push((n, player, debug));
+    }
+    let mut pairs = Vec::new();
+    for (a, a_player, a_dbg) in &snaps {
+        let Some(pa) = pos(&a_player["position"]) else { continue };
+        let a_id = &a_dbg["net_id"];
+        for (b, _, b_dbg) in snaps.iter().filter(|s| s.0 != *a) {
+            let remote = b_dbg["remotes"].as_array().and_then(|r| r.iter().find(|x| &x["net_id"] == a_id));
+            let entry = match remote {
+                None => json!({ "a": a, "b": b, "a_net_id": a_id, "error": "B has no remote for A's net_id (not synced yet?)" }),
+                Some(r) => {
+                    let rendered = pos(&r["position"]);
+                    let networked = pos(&r["net_position"]);
+                    json!({
+                        "a": a, "b": b, "a_net_id": a_id,
+                        "a_position": a_player["position"],
+                        "b_ped_position": r["position"],
+                        // A's true position vs what B renders: what a player in B sees.
+                        "total_error_m": rendered.map(|p| r2(dist(pa, p))),
+                        // A's true position vs the last state B received: network staleness.
+                        "network_lag_m": networked.map(|p| r2(dist(pa, p))),
+                        // Last received state vs B's ped: local interpolation/steering error.
+                        "render_error_m": rendered.zip(networked).map(|(x, y)| r2(dist(x, y))),
+                        "b_state_age_ms": r["age_ms"],
+                        "b_ped_mode": r["ped_mode"],
+                        "b_snaps": r["snaps"],
+                    })
+                }
+            };
+            pairs.push(entry);
+        }
+    }
+    Some(json!({ "matching": format!("net_id via {plugin} sa_debug_json"), "pairs": pairs }))
+}
+
+fn stats(mut v: Vec<f64>) -> Value {
+    if v.is_empty() {
+        return Value::Null;
+    }
+    v.sort_by(f64::total_cmp);
+    let mean = v.iter().sum::<f64>() / v.len() as f64;
+    let p95 = v[((v.len() as f64 * 0.95).ceil() as usize).saturating_sub(1).min(v.len() - 1)];
+    json!({ "mean": r2(mean), "p95": r2(p95), "max": r2(*v.last().unwrap()), "samples": v.len() })
+}
+
+/// Samples `compare_by_net_id` over time: per (a, b) pair, error statistics and a compact series.
+pub fn sync_trace(args: &Value) -> Result<Value, String> {
+    let seconds = args.get("seconds").and_then(Value::as_f64).unwrap_or(5.0).clamp(0.5, 60.0);
+    let hz = args.get("hz").and_then(Value::as_f64).unwrap_or(10.0).clamp(1.0, 30.0);
+    let plugin = args.get("plugin").and_then(Value::as_str).unwrap_or("minisamp.asi");
+    let list = targets(crate::tools::instances_arg(args));
+    if list.len() < 2 {
+        return Err("need at least two running instances".into());
+    }
+    let start = Instant::now();
+    let interval = Duration::from_secs_f64(1.0 / hz);
+    let mut series: std::collections::BTreeMap<String, Vec<Value>> = Default::default();
+    let mut next = start;
+    while start.elapsed().as_secs_f64() < seconds {
+        let t = start.elapsed().as_millis() as u64;
+        let snap = compare_by_net_id(&list, plugin).ok_or("instances do not expose net ids via plugin_query")?;
+        for p in snap["pairs"].as_array().into_iter().flatten() {
+            let key = format!("{}->{}", p["a"], p["b"]);
+            series.entry(key).or_default().push(json!({
+                "t_ms": t,
+                "total": p["total_error_m"],
+                "lag": p["network_lag_m"],
+                "render": p["render_error_m"],
+                "mode": p["b_ped_mode"],
+                "snaps": p["b_snaps"],
+            }));
+        }
+        next += interval;
+        if let Some(wait) = next.checked_duration_since(Instant::now()) {
+            std::thread::sleep(wait);
+        }
+    }
+    let mut out = Map::new();
+    for (key, samples) in series {
+        let col = |k: &str| samples.iter().filter_map(|s| s[k].as_f64()).collect::<Vec<_>>();
+        let snaps_first = samples.first().and_then(|s| s["snaps"].as_u64()).unwrap_or(0);
+        let snaps_last = samples.last().and_then(|s| s["snaps"].as_u64()).unwrap_or(0);
+        out.insert(
+            key,
+            json!({
+                "total_error_m": stats(col("total")),
+                "network_lag_m": stats(col("lag")),
+                "render_error_m": stats(col("render")),
+                "snaps_during_trace": snaps_last.saturating_sub(snaps_first),
+                "series": samples,
+            }),
+        );
+    }
+    Ok(json!({ "seconds": seconds, "hz": hz, "pairs": out }))
+}
+
+/// Exact matching when a plugin exposes network ids, otherwise a heuristic: a remote player
+/// is the nearest non-local ped, a remote vehicle the nearest one with the same model.
+pub fn compare(instances: Option<Vec<u8>>, plugin: Option<&str>) -> Result<Value, String> {
+    let list = targets(instances.clone());
+    if list.len() < 2 {
+        return Err("need at least two running instances".into());
+    }
+    if let Some(v) = compare_by_net_id(&list, plugin.unwrap_or("minisamp.asi")) {
+        return Ok(v);
+    }
     struct Snap {
         n: u8,
         player: Value,
@@ -272,7 +383,7 @@ pub fn compare(instances: Option<Vec<u8>>) -> Result<Value, String> {
         }
     }
     Ok(json!({
-        "note": "Matching is nearest-entity heuristic (no network ids yet). Missing remote_ped_in_b means B shows no other ped at all.",
+        "matching": "nearest-entity heuristic (no plugin exposing net ids). Missing remote_ped_in_b means B shows no other ped at all.",
         "pairs": pairs,
     }))
 }

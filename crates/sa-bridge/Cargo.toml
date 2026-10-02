@@ -12,6 +12,7 @@ crate-type = ["cdylib"]
 proto = { path = "../proto" }
 sa-sdk = { path = "../sa-sdk" }
 serde_json.workspace = true
+base64 = "0.22"
 
 [dependencies.windows]
 version = "0.58"
@@ -24,4 +25,6 @@ features = [
     "Win32_System_Memory",
     "Win32_Security",
     "Win32_System_LibraryLoader",
+    "Win32_Graphics_Direct3D9",
+    "Win32_Graphics_Gdi",
 ]

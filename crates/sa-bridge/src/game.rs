@@ -36,7 +36,7 @@ pub unsafe fn handle(req: &Request) -> Response {
 
 fn dispatch(req: &Request) -> Result<Value, String> {
     match req {
-        Request::Status | Request::Logs | Request::Record { .. } => Err("handled on network thread".into()),
+        Request::Status | Request::Logs | Request::Record { .. } | Request::Screenshot { .. } => Err("handled on network thread".into()),
 
         Request::PlayerState => {
             let ped = require_player()?;

@@ -2,6 +2,7 @@
 //! Implements: initialize, ping, tools/list, tools/call. Logs go to stderr.
 
 mod bridge;
+mod mpserver;
 mod multi;
 mod screenshot;
 mod tools;

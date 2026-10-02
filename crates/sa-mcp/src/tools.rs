@@ -6,7 +6,7 @@ use base64::Engine;
 use proto::{InputStep, Request, Response, ScriptArg, ScriptCommand};
 use serde_json::{json, Value};
 
-use crate::{bridge, multi, screenshot};
+use crate::{bridge, mpserver, multi, screenshot};
 
 fn tool(name: &str, description: &str, properties: Value, required: &[&str]) -> Value {
     json!({
@@ -86,8 +86,19 @@ pub fn definitions() -> Vec<Value> {
         tool("stop_instances", "Terminate game instances.", json!({ "instances": instances.clone() }), &[]),
         tool(
             "compare_instances",
-            "Desync check: for each pair of instances, find where instance A's local player appears in instance B (nearest non-local ped, and nearest vehicle of the same model if A is driving) and report position/heading/health differences.",
-            json!({ "instances": instances.clone() }),
+            "Desync check: for each pair of instances, where does instance A's local player appear in instance B?              Exact when a plugin exports sa_debug_json with net ids (default plugin minisamp.asi): splits the error into network lag              (A's position vs last state B received) and render error (that state vs B's ped). Otherwise falls back to nearest-ped matching.",
+            json!({ "instances": instances.clone(), "plugin": { "type": "string", "description": "Module exporting sa_debug_json (default minisamp.asi)" } }),
+            &[],
+        ),
+        tool(
+            "sync_trace",
+            "Sample compare_instances (net-id matching) over time and return, per instance pair, mean/p95/max of total, network-lag and              render error plus snap count and a series. Use while driving a client with `input` (wait=false) and/or with server_netsim to tune sync.",
+            json!({
+                "instances": instances.clone(),
+                "seconds": { "type": "number", "description": "default 5, max 60" },
+                "hz": { "type": "number", "description": "default 10, max 30" },
+                "plugin": { "type": "string", "description": "default minisamp.asi" },
+            }),
             &[],
         ),
         tool(
@@ -100,6 +111,29 @@ pub fn definitions() -> Vec<Value> {
             }),
             &["seconds"],
         ),
+        // --- multiplayer server (SA_MCP_SERVER_CMD / SA_MCP_SERVER_ADMIN) ---
+        tool(
+            "server_start",
+            "Start the multiplayer server under development (command from SA_MCP_SERVER_CMD or `command`), wait for its admin port. Output goes to a log file (server_logs).",
+            json!({ "command": { "type": "string", "description": "Override the server command line" } }),
+            &[],
+        ),
+        tool("server_stop", "Stop the server started by server_start.", json!({}), &[]),
+        tool("server_status", "Server state from its admin port: players (id, name, address, last state, packet/byte counters, stale syncs), tick, netsim, packet kind totals.", json!({}), &[]),
+        tool(
+            "server_netsim",
+            "Get or set simulated network conditions on the server, applied to every packet in both directions: latency_ms (one-way, RTT grows by 2x), jitter_ms (uniform 0..j extra), loss_pct.",
+            json!({ "latency_ms": { "type": "integer" }, "jitter_ms": { "type": "integer" }, "loss_pct": { "type": "number" } }),
+            &[],
+        ),
+        tool(
+            "server_packets",
+            "Recent packet log from the server (time, direction, client, kind, size, dropped by netsim).",
+            json!({ "limit": { "type": "integer", "description": "default 50" }, "kind": { "type": "string", "description": "Only this packet kind, e.g. Sync / Snapshot / Hello" } }),
+            &[],
+        ),
+        tool("server_kick", "Kick a player by id.", json!({ "id": { "type": "integer" } }), &["id"]),
+        tool("server_logs", "Tail of the server's stdout/stderr.", json!({ "lines": { "type": "integer", "description": "default 50" } }), &[]),
         // --- per-instance state ---
         itool("game_status", "Bridge connectivity, game version, whether the game loop is running, player presence.", json!({}), &[]),
         itool("get_player_state", "Player position, heading, health, armor, money, wanted level, interior and current vehicle.", json!({}), &[]),
@@ -333,8 +367,30 @@ pub fn call(name: &str, args: &Value) -> Option<Value> {
         "list_instances" => return Some(json_result(Ok(multi::list()))),
         "launch_instances" => return Some(json_result(multi::launch(args))),
         "stop_instances" => return Some(json_result(multi::stop(instances_arg(args)))),
-        "compare_instances" => return Some(json_result(multi::compare(instances_arg(args)))),
+        "compare_instances" => return Some(json_result(multi::compare(instances_arg(args), args.get("plugin").and_then(Value::as_str)))),
         "record" => return Some(json_result(multi::record(args))),
+        "sync_trace" => return Some(json_result(multi::sync_trace(args))),
+        "server_start" => return Some(json_result(mpserver::start(args))),
+        "server_stop" => return Some(json_result(mpserver::stop())),
+        "server_status" => return Some(json_result(mpserver::admin(json!({ "cmd": "status" })))),
+        "server_netsim" => {
+            let mut req = json!({ "cmd": "netsim" });
+            for k in ["latency_ms", "jitter_ms", "loss_pct"] {
+                if let Some(v) = args.get(k) {
+                    req[k] = v.clone();
+                }
+            }
+            return Some(json_result(mpserver::admin(req)));
+        }
+        "server_packets" => {
+            let mut req = json!({ "cmd": "packets", "limit": args.get("limit").cloned().unwrap_or(json!(50)) });
+            if let Some(k) = args.get("kind") {
+                req["kind"] = k.clone();
+            }
+            return Some(json_result(mpserver::admin(req)));
+        }
+        "server_kick" => return Some(json_result(mpserver::admin(json!({ "cmd": "kick", "id": args.get("id").cloned().unwrap_or(Value::Null) })))),
+        "server_logs" => return Some(json_result(mpserver::logs(args))),
         "game_status" => return Some(game_status(instance)),
         "screenshot" => return Some(take_screenshot(instance, args)),
         "input" => return Some(run_input(instance, args)),
@@ -420,6 +476,24 @@ fn take_screenshot(instance: Option<u8>, args: &Value) -> Value {
         Err(e) if instance.is_some() => return text_result(e, true),
         Err(_) => None,
     };
+    // Preferred: back buffer copied in-process by the bridge (immune to DWM/occlusion issues).
+    if let Ok(d) = bridge::query(instance, &Request::Screenshot { max_width }) {
+        let w = d["width"].as_u64().unwrap_or(0) as u32;
+        let h = d["height"].as_u64().unwrap_or(0) as u32;
+        let raw = d["bgra_b64"].as_str().and_then(|b| base64::engine::general_purpose::STANDARD.decode(b).ok());
+        if let Some(bgra) = raw.filter(|b| b.len() == (w * h * 4) as usize) {
+            return match screenshot::encode(&bgra, w, h, 0) {
+                Ok(shot) => json!({
+                    "content": [
+                        { "type": "image", "mimeType": "image/png", "data": base64::engine::general_purpose::STANDARD.encode(&shot.png) },
+                        { "type": "text", "text": format!("{}x{} (back buffer)", shot.width, shot.height) },
+                    ],
+                    "isError": false,
+                }),
+                Err(e) => text_result(e, true),
+            };
+        }
+    }
     match screenshot::capture(pid, max_width) {
         Ok(shot) => json!({
             "content": [
