@@ -24,6 +24,7 @@ gtamods, not yet confirmed here.
 | `CRunningScript::ProcessOneCommand` | `0x469EB0` | static, live | IP at +0x14, opcode u16, bit 15 = NOT |
 | `CRunningScript` layout | base IP +0x10, IP +0x14, stack +0x18, sp +0x38, locals +0x3C, cond +0xC5, NOT +0xD2, isMission +0xDC, size 0xE0 | static, live | Init + CollectParameters |
 | `CPad::GetPad` / pads | `0x53FB70`, `0xB73458 + n*0x134`, NewState at +0 | static, live | injected sprint moved CJ ~8 m/s |
+| `RwD3D9Device` | `0xC97C28` | live | `IDirect3DDevice9*`; vtable may be a plugin's heap copy (WindowedMode swaps Reset); Present = slot 17 |
 | `CWorld::Remove` | `0x563280` | static, live | calls `entity->Remove()` (vtbl+0xC); used by teleport |
 | `CWorld::Add` | `0x563220` | static, live | reads `m_pRwObject` +0x18, matrix +0x14, placement +0x4 |
 | `CWorld::Players` | `0xB7CD98`, stride `0x190` | static, live | `FindPlayerPed` @ `0x56E210` |

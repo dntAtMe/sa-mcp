@@ -75,13 +75,15 @@ Two clients are in the world about 10 s after `launch_instances {count: 2}`. Wit
 | Tool | Description |
 |---|---|
 | `list_instances` | Running clients: slot, pid, port, game state, player position |
-| `launch_instances` | Start N clients with a boot config, wait until they are in game, tile windows |
+| `launch_instances` | Start N clients with a boot config (+ `env` / `env_per_instance`), wait until they are in game, tile windows |
 | `stop_instances` | Terminate clients |
 | `input` | Timed controller-input sequences (forward, sprint, jump, enter_exit, accelerate, steer_left, ... or raw `CControllerState` fields). No window focus needed |
 | `input_clear` | Stop injected input |
 | `run_script` | Execute SCM opcodes in a persistent script context (32 local vars kept between calls; created handles come back in vars) |
 | `record` | Sample player position/heading/speed/health on several clients in parallel |
-| `compare_instances` | Desync check: where does client A's player appear in client B (nearest-entity heuristic until there are network ids) |
+| `compare_instances` | Desync check: where does client A's player appear in client B. Exact via a plugin's net ids (splits network lag vs render error), else nearest-entity heuristic |
+| `sync_trace` | `compare_instances` sampled over time: mean/p95/max error per pair, snap count, series |
+| `plugin_query` | Read a plugin's debug state through its `sa_debug_json` export (see below) |
 | `game_status` | Bridge, game version, hooks, frames pumped, pid, player present |
 | `get_player_state` | Position, heading, health, armor, money, wanted level, interior, vehicle |
 | `get_world_state` | Clock, weather, area, timer, game state |
@@ -91,7 +93,25 @@ Two clients are in the world about 10 s after `launch_instances {count: 2}`. Wit
 | `set_time` / `set_weather` | World control |
 | `read_memory` / `write_memory` | Raw, fault-safe (ReadProcessMemory) access; reads work during loads |
 | `bridge_logs` | Ring buffer of bridge log lines |
-| `screenshot` | PNG of the instance's window (downscaled to 960 px wide by default) |
+| `screenshot` | PNG of the instance's back buffer, copied in-process right before Present (falls back to PrintWindow) |
+| `server_start` / `server_stop` | Run the multiplayer server under development (`SA_MCP_SERVER_CMD`) |
+| `server_status` / `server_packets` / `server_logs` | Players, RTT, counters, packet log, stdout |
+| `server_netsim` | Simulated latency / jitter / loss on the server |
+| `server_kick` | Kick a player |
+
+## Developing a plugin against sa-mcp
+
+- **`sa-sdk` crate**: addresses, fault-tolerant memory access, call-site hooks, SCM executor and
+  world helpers. Use it from your own ASI: `sa-sdk = { git = "https://github.com/dntAtMe/sa-mcp" }`.
+- **Debug export**: export `extern "C" fn sa_debug_json(buf: *mut u8, cap: u32) -> u32` (write UTF-8
+  JSON into `buf`, return the full length needed). `plugin_query` calls it on the game thread.
+  Include top-level `net_id` and `remotes: [{net_id, position, net_position, age_ms, ped_mode,
+  snaps}]` and `compare_instances` / `sync_trace` match players exactly.
+- **Server admin contract** (for `server_*`): loopback TCP (`SA_MCP_SERVER_ADMIN`, default
+  127.0.0.1:7778), one JSON per line: `{"cmd":"status"|"netsim"|"packets"|"kick"|"shutdown", ...}`
+  answered with `{"ok":true,"data":...}` or `{"ok":false,"error":"..."}`.
+
+[mini-samp](https://github.com/dntAtMe/minisamp) (branch `rust-multiplayer`) implements all three.
 
 ## Troubleshooting
 
