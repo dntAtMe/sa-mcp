@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "gta-sa": {
+      "command": "target/i686-pc-windows-msvc/release/sa-mcp.exe",
+      "args": [],
+      "env": {
+        "GTA_SA_DIR": "${GTA_SA_DIR:-C:\\Program Files (x86)\\Rockstar Games\\GTA San Andreas}"
+      }
+    }
+  }
+}

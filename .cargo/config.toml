@@ -1,0 +1,8 @@
+# GTA San Andreas is a 32-bit process, so the bridge DLL must be i686.
+# The MCP server is built for the same target to keep the workspace single-target;
+# it runs fine on 64-bit Windows.
+[build]
+target = "i686-pc-windows-msvc"
+
+[target.i686-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
