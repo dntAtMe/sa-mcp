@@ -25,6 +25,10 @@ pub const LOGO_NEXT_STATE_IMM: u32 = 0x748B0E;
 /// [static] WinMain main loop: `cmp [ForegroundApp 0x8D621C], 0; je +0x320` (6 bytes at
 /// 0x748A8D) skips the frame and Sleep(100)s while the window is in the background.
 pub const MAINLOOP_BACKGROUND_JE: u32 = 0x748A8D;
+/// [static] `call [IAT SetCursorPos]` sites: mouse-look recentring (0x57C59B) and
+/// psMouseSetPos (0x74542D). Operand (IAT slot address) at +2.
+pub const CALL_SET_CURSOR_POS: [u32; 2] = [0x57C59B, 0x74542D];
+pub const IAT_SET_CURSOR_POS: u32 = 0x858300;
 /// [static] Opens the pause menu on focus loss (`if (!0xBA6831 && !menuActive)
 /// activateMenuNextFrame = 1`). Only caller: WndProc deactivate path at 0x748063.
 pub const PAUSE_ON_FOCUS_LOSS: u32 = 0x53BC60;

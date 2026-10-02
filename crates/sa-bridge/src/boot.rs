@@ -47,11 +47,43 @@ pub fn apply_patches() {
     if !cfg.pause_when_unfocused {
         patch(MAINLOOP_BACKGROUND_JE, &[0x90; 6], "run in background");
         patch(PAUSE_ON_FOCUS_LOSS, &[0xC3], "no pause menu on focus loss");
+        // A background client still runs its mouse code, which recentres the cursor every
+        // frame and takes the mouse away from the user. Only let SetCursorPos through while
+        // this game window is in the foreground.
+        unsafe { redirect_set_cursor_pos() };
     }
     if cfg.skip_intro {
         patch(LOGO_NEXT_STATE_IMM, &5u32.to_le_bytes(), "skip intro movies");
     }
     log::write(&format!("boot config: {}", serde_json::to_string(cfg).unwrap_or_default()));
+}
+
+/// Slot holding our SetCursorPos filter; the `call [slot]` operands are pointed here.
+static mut CURSOR_SLOT: usize = 0;
+
+unsafe extern "system" fn set_cursor_pos_when_focused(x: i32, y: i32) -> i32 {
+    use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId};
+    let mut pid = 0u32;
+    GetWindowThreadProcessId(GetForegroundWindow(), Some(&mut pid));
+    if pid != std::process::id() {
+        return 1;
+    }
+    // Whatever is in the IAT now (another plugin may have hooked it).
+    let real: unsafe extern "system" fn(i32, i32) -> i32 =
+        std::mem::transmute(mem::read::<u32>(IAT_SET_CURSOR_POS).unwrap_or(0) as usize);
+    real(x, y)
+}
+
+unsafe fn redirect_set_cursor_pos() {
+    CURSOR_SLOT = set_cursor_pos_when_focused as *const () as usize;
+    let slot = std::ptr::addr_of!(CURSOR_SLOT) as u32;
+    for site in CALL_SET_CURSOR_POS {
+        if mem::read::<[u8; 6]>(site) == Some([0xFF, 0x15, 0x00, 0x83, 0x85, 0x00]) {
+            patch(site + 2, &slot.to_le_bytes(), "SetCursorPos only when focused");
+        } else {
+            log::write(&format!("unexpected bytes at SetCursorPos call {site:#x}; left alone"));
+        }
+    }
 }
 
 fn patch(address: u32, bytes: &[u8], what: &str) {
@@ -61,8 +93,28 @@ fn patch(address: u32, bytes: &[u8], what: &str) {
     }
 }
 
+/// Hands focus back to the launcher's window once our window takes it (first 15 s only).
+unsafe fn return_focus() {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId, SetForegroundWindow};
+    static DONE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    static START: OnceLock<std::time::Instant> = OnceLock::new();
+    let Some(target) = config().return_focus_to else { return };
+    if DONE.load(Ordering::Relaxed) || START.get_or_init(std::time::Instant::now).elapsed().as_secs() > 15 {
+        return;
+    }
+    let mut pid = 0u32;
+    GetWindowThreadProcessId(GetForegroundWindow(), Some(&mut pid));
+    if pid == std::process::id() {
+        DONE.store(true, Ordering::Relaxed);
+        let ok = SetForegroundWindow(HWND(target as isize as *mut _)).as_bool();
+        log::write(&format!("returned focus to {target:#x}: {ok}"));
+    }
+}
+
 /// Game thread, menu frames.
 pub unsafe fn on_menu_frame() {
+    return_focus();
     if !config().auto_start {
         return;
     }
@@ -81,6 +133,7 @@ pub unsafe fn on_menu_frame() {
 
 /// Game thread, in-game frames.
 pub unsafe fn on_game_frame() {
+    return_focus();
     let cfg = config();
     let frame = GAME_FRAMES.fetch_add(1, Ordering::Relaxed);
     if frame == 0 && cfg.mp_mode {

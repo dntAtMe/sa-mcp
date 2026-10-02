@@ -253,8 +253,12 @@ pub fn definitions() -> Vec<Value> {
         itool("bridge_logs", "Recent log lines from the in-game bridge plugin.", json!({}), &[]),
         itool(
             "screenshot",
-            "Capture the game window as a PNG image.",
-            json!({ "max_width": { "type": "integer", "description": "Downscale to this width (default 960, 0 = full size)" } }),
+            "Capture the game as PNG (back buffer, in-process). With `frames` > 1 returns a burst of images `interval_ms` apart,              for checking animations and effects.",
+            json!({
+                "max_width": { "type": "integer", "description": "Downscale to this width (default 960, or 400 for bursts; 0 = full size)" },
+                "frames": { "type": "integer", "minimum": 1, "maximum": 8, "description": "Number of images (default 1)" },
+                "interval_ms": { "type": "integer", "description": "Delay between burst frames (default 150)" },
+            }),
             &[],
         ),
     ]
@@ -493,7 +497,39 @@ fn run_input(instance: Option<u8>, args: &Value) -> Value {
     }))
 }
 
+/// Back-buffer frames `interval_ms` apart, as separate image content items.
+fn burst(instance: Option<u8>, args: &Value, frames: usize) -> Value {
+    let max_width = args.get("max_width").and_then(Value::as_u64).unwrap_or(400) as u32;
+    let interval = Duration::from_millis(args.get("interval_ms").and_then(Value::as_u64).unwrap_or(150));
+    let start = std::time::Instant::now();
+    let mut content = Vec::new();
+    for i in 0..frames {
+        let t = start.elapsed().as_millis();
+        let shot = bridge::query(instance, &Request::Screenshot { max_width }).and_then(|d| {
+            let w = d["width"].as_u64().unwrap_or(0) as u32;
+            let h = d["height"].as_u64().unwrap_or(0) as u32;
+            let bgra = d["bgra_b64"].as_str().and_then(|b| base64::engine::general_purpose::STANDARD.decode(b).ok()).ok_or("bad capture")?;
+            screenshot::encode(&bgra, w, h, 0)
+        });
+        match shot {
+            Ok(s) => {
+                content.push(json!({ "type": "text", "text": format!("frame {i} at {t} ms") }));
+                content.push(json!({ "type": "image", "mimeType": "image/png", "data": base64::engine::general_purpose::STANDARD.encode(&s.png) }));
+            }
+            Err(e) => return text_result(format!("frame {i}: {e}"), true),
+        }
+        if i + 1 < frames {
+            std::thread::sleep(interval.saturating_sub(start.elapsed().saturating_sub(interval * i as u32)));
+        }
+    }
+    json!({ "content": content, "isError": false })
+}
+
 fn take_screenshot(instance: Option<u8>, args: &Value) -> Value {
+    let frames = args.get("frames").and_then(Value::as_u64).unwrap_or(1).clamp(1, 8) as usize;
+    if frames > 1 {
+        return burst(instance, args, frames);
+    }
     let max_width = args.get("max_width").and_then(Value::as_u64).unwrap_or(960) as u32;
     // Prefer the window of the requested instance; fall back to any game window when no bridge runs.
     let pid = match bridge::query(instance, &Request::Status) {

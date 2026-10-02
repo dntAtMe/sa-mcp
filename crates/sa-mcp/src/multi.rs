@@ -56,7 +56,11 @@ pub fn launch(args: &Value) -> Result<Value, String> {
             boot[k] = v.clone();
         }
     }
-    let boot: BootConfig = serde_json::from_value(boot).map_err(|e| format!("bad boot config: {e}"))?;
+    let mut boot: BootConfig = serde_json::from_value(boot).map_err(|e| format!("bad boot config: {e}"))?;
+    if boot.return_focus_to.is_none() {
+        let fg = unsafe { windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow() };
+        boot.return_focus_to = (!fg.0.is_null()).then_some(fg.0 as usize as u64);
+    }
     let boot_json = serde_json::to_string(&boot).unwrap();
 
     let free = proto::MAX_INSTANCES as usize - bridge::live_instances().len();

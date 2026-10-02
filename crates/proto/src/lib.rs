@@ -95,6 +95,10 @@ pub struct BootConfig {
     pub spawn: Option<Spawn>,
     /// [hour, minute]
     pub time: Option<[u8; 2]>,
+    /// Window (HWND) that had focus when the client was launched; the bridge gives focus
+    /// back to it as soon as the game window grabs it, so launching never steals the user's
+    /// mouse and keyboard.
+    pub return_focus_to: Option<u64>,
     pub weather: Option<i16>,
 }
 
