@@ -17,7 +17,7 @@ Agent ──stdio MCP──► sa-mcp.exe ──JSON lines over 127.0.0.1:47311�
 | Crate | What |
 |---|---|
 | `crates/proto` | Request/response types shared by both sides |
-| `crates/sa-bridge` | `cdylib` → `sa_bridge.asi`. MinHook hooks on `Idle` and `FrontendIdle`; all game access happens on the game thread |
+| `crates/sa-bridge` | `cdylib` → `sa_bridge.asi`. Hooks the `call Idle` / `call FrontendIdle` sites (chaining to whatever was there, so it composes with modloader/SilentPatch); all game access happens on the game thread |
 | `crates/sa-mcp` | stdio MCP server (hand-rolled JSON-RPC, no async runtime) |
 
 ## Requirements
@@ -37,7 +37,19 @@ $env:GTA_SA_DIR = "C:\path\to\GTA San Andreas"   # or setx GTA_SA_DIR ... to per
 `.mcp.json` registers the server for Claude Code as `gta-sa` (it reads `GTA_SA_DIR` for `launch_game`).
 Other MCP clients: run `target/i686-pc-windows-msvc/release/sa-mcp.exe` over stdio.
 
-The bridge writes `sa_bridge.log` next to `gta_sa.exe`.
+The bridge writes `sa_bridge.log` next to `gta_sa.exe`, including register/stack dumps of the first
+access violations if the game crashes.
+
+Tested with: 1.0 US exe + Silent's ASI Loader, SilentPatch, modloader, III.VC.SA.WindowedMode.
+
+## Troubleshooting
+
+| Symptom | Cause |
+|---|---|
+| `cannot reach sa-bridge` | Game not running, `.asi` not loaded (check for `sa_bridge.log`), or port 47311 taken |
+| `timed out waiting for game thread` | Game is in intro movies, loading, frozen or minimized. `read_memory`, `game_status` and `bridge_logs` still work |
+| `game window not found` (screenshot) | No visible window owned by `gta_sa.exe` |
+| Crash right after starting/loading a game | Check `sa_bridge.log` for an `AV at eip=...` dump; see `docs/addresses.md` for known conflicts |
 
 ## Tools
 
